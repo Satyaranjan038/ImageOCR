@@ -55,7 +55,7 @@ def get_password():
         return jsonify({"message": "Email is required"}), 400
 
     # Search for the user in the database
-    user = user_collection.find_one({"email": email})
+    user = user_collection.find_one({"userName": email})
     if user:
         # Assuming the password is stored in plaintext (not recommended)
         password = user.get("password")
