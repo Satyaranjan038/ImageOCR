@@ -46,7 +46,25 @@ def delete_all_data():
     except Exception as e:
         print(f"An error occurred: {e}")
 
+@app.route('/get-password', methods=['POST'])
+def get_password():
+    data = request.json
+    email = data.get("email")
 
+    if not email:
+        return jsonify({"message": "Email is required"}), 400
+
+    # Search for the user in the database
+    user = user_collection.find_one({"email": email})
+    if user:
+        # Assuming the password is stored in plaintext (not recommended)
+        password = user.get("password")
+        if password:
+            return jsonify({"email": email, "password": password}), 200
+        else:
+            return jsonify({"message": "Password not found for the given email"}), 404
+
+    return jsonify({"message": "No user found with the provided email address"}), 404
 
 def test_connection():
     try:
