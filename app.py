@@ -38,6 +38,8 @@ current_month_collection = db['CurrentMonthTransactions']
 user_collection = db['User'] #user collection
 signup_collection = db['SignUp'] #signup collection
 friendship_data_collection = db["friendship"] #friendship data
+category_mapping_collection = db['CategoryMapping']  # Collection to store party-category mappings
+
 
 def delete_all_data():
     try:
@@ -77,52 +79,59 @@ def test_connection():
 def upload_file():
     if 'file' not in request.files:
         return jsonify({"error": "No file part"}), 400
-    
+
     file = request.files['file']
     password = request.form.get('password', '')  # Optional password input
     user_name = request.form.get('userName')  # Get the username from the form data
-    device = request.form.get("device") 
+    device = request.form.get("device")
 
     if not user_name:
         return jsonify({"error": "Username is required"}), 400
 
     if file.filename == '':
         return jsonify({"error": "No selected file"}), 400
-    
+
     # Create a temporary directory and save the file there
     with tempfile.TemporaryDirectory() as tmpdirname:
         file_path = os.path.join(tmpdirname, file.filename)
         file.save(file_path)
 
         # Extract PDF details (assuming extract_pdf_details is already implemented)
-
-        if device=="ios":
+        if device == "ios":
             data = extract_pdf_details(file_path, password)
-        else :
+        else:
             data = extract_pdf_details_android(file_path, password)
 
         # Aggregating amounts by month, year, and transaction type
         aggregated_amounts = defaultdict(lambda: defaultdict(float))
         current_month_transactions = []
-        delete_data(username)
 
         for transaction in data['transactions']:
-            date_str = transaction.get('date')  
-            transaction_type = transaction.get('transaction_type')  
-            amount_str = transaction.get('amount')  
+            date_str = transaction.get('date')
+            transaction_type = transaction.get('transaction_type')
+            amount_str = transaction.get('amount')
+            party = transaction.get('party')
 
-            if not all([date_str, transaction_type, amount_str]):
-                return jsonify({"error": "Transaction data is incomplete"}), 400
+            if not all([date_str, transaction_type, amount_str, party]):
+                print(f"Incomplete transaction data: {transaction}")
+                continue
+            
 
             # Parse date and amount
             date = datetime.strptime(date_str, '%b %d, %Y')
             amount = float(amount_str.replace("INR ", "").replace(",", ""))
+
+            # Fetch the category from the category mapping
+            mapping = category_mapping_collection.find_one({"party": party})
+            category = mapping['category'] if mapping else None
 
             # Create a key for month and year
             year_month_key = f"{date.year}-{date.strftime('%B').upper()}"
 
             # Aggregate amount
             aggregated_amounts[year_month_key][transaction_type] += amount
+
+            
 
             # Collect current month's transactions
             current_month = datetime.now().strftime('%B').upper()
@@ -140,10 +149,13 @@ def upload_file():
                         "date": date_str,
                         "amount": amount,
                         "transactionType": transaction_type,
-                        "party": transaction.get('party'),
-                        "category": None  # Initialize with None or a default category
+                        "party": party,
+                        "category": category  # Assign the fetched category
                     })
-                # print("current month transaction " + current_month_transactions) ; 
+
+        # Save current month's transactions to a separate collection
+        if current_month_transactions:
+            current_month_collection.insert_many(current_month_transactions)
 
         # Save or update the aggregated amounts to MongoDB
         for year_month, type_amounts in aggregated_amounts.items():
@@ -159,12 +171,8 @@ def upload_file():
 
                 if existing_transaction:
                     collection.update_one(
-                        {
-                            "_id": existing_transaction["_id"]
-                        },
-                        {
-                            "$set": {"amount": amount}
-                        }
+                        {"_id": existing_transaction["_id"]},
+                        {"$set": {"amount": amount}}
                     )
                 else:
                     collection.insert_one({
@@ -175,13 +183,8 @@ def upload_file():
                         "transactionType": transaction_type
                     })
 
-        # Save current month's transactions to a separate collection
-        # print("current month transaction " + current_month_transactions)  
-        if current_month_transactions:
-            
-            current_month_collection.insert_many(current_month_transactions)
-
     return jsonify(data), 201
+
 
 
 @app.route('/androidUpload', methods=['POST'])
@@ -327,7 +330,7 @@ def delete_completed_month():
 @app.route('/update-category/<transaction_id>', methods=['PUT'])
 def update_category(transaction_id):
     try:
-        # Get the new category from the request data
+        # Get the new category and fetch the transaction
         new_category = request.json.get('category')
         if not new_category:
             return jsonify({"error": "Category is required"}), 400
@@ -335,19 +338,43 @@ def update_category(transaction_id):
         # Convert transaction_id to ObjectId
         transaction_id = ObjectId(transaction_id)
 
-        # Find the transaction by _id and update the category
-        result = current_month_collection.update_one(
+        # Find the transaction by _id
+        transaction = current_month_collection.find_one({"_id": transaction_id})
+        if not transaction:
+            return jsonify({"error": "Transaction not found"}), 404
+
+        # Update the category of the specific transaction
+        current_month_collection.update_one(
             {"_id": transaction_id},
             {"$set": {"category": new_category}}
         )
 
-        if result.matched_count == 0:
-            return jsonify({"error": "Transaction not found"}), 404
+        # Update the category mapping for the party
+        party = transaction.get('party')
+        if not party:
+            return jsonify({"error": "Party not found in the transaction"}), 400
+
+        category_mapping_collection.update_one(
+            {"party": party},
+            {"$set": {"category": new_category}},
+            upsert=True
+        )
+
+        # Update all existing transactions for this party
+        current_month_collection.update_many(
+            {"party": party},
+            {"$set": {"category": new_category}}
+        )
+        collection.update_many(
+            {"party": party},
+            {"$set": {"category": new_category}}
+        )
 
         return jsonify({"message": "Category updated successfully"}), 200
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
 
 @app.route('/get-category-totals/<username>', methods=['GET'])
 def get_category_totals(username):
